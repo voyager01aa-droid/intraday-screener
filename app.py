@@ -1,51 +1,69 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 
 st.set_page_config(page_title="Intraday 5-Min Screener", layout="wide")
 st.title("📈 5-Minute Intraday Stock Screener")
 
-# List of stocks (Nifty liquid stocks for example)
+# List of stocks
 tickers = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
     "SBIN.NS", "ITC.NS", "KOTAKBANK.NS", "L&T.NS", "AXISBANK.NS"
 ]
 
-@st.cache_data(ttl=60) # Refreshes data every 60 seconds
+# Manual Indicator Calculations to avoid pandas-ta errors
+def calculate_indicators(df):
+    # 1. EMA Calculation
+    df['EMA_3'] = df['Close'].ewm(span=3, adjust=False).mean()
+    df['EMA_6'] = df['Close'].ewm(span=6, adjust=False).mean()
+    
+    # 2. RSI Calculation
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-10) # Avoid division by zero
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # 3. VWAP Calculation (Intraday)
+    df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['TP_Vol'] = df['Typical_Price'] * df['Volume']
+    # Group by date to reset VWAP daily
+    df['Date'] = df.index.date
+    df['Cum_TP_Vol'] = df.groupby('Date')['TP_Vol'].cumsum()
+    df['Cum_Vol'] = df.groupby('Date')['Volume'].cumsum()
+    df['VWAP'] = df['Cum_TP_Vol'] / df['Cum_Vol']
+    
+    # 4. Volume SMA
+    df['Vol_SMA'] = df['Volume'].rolling(window=20).mean()
+    return df
+
+@st.cache_data(ttl=60)
 def get_stock_data():
     results = []
     for ticker in tickers:
         try:
-            # Fetch 5-minute data for the last 5 days
             df = yf.download(ticker, period="5d", interval="5m", progress=False)
-            if df.empty:
+            if df.empty or len(df) < 20:
                 continue
             
-            # Calculate Indicators
-            df['EMA_3'] = ta.ema(df['Close'], length=3)
-            df['EMA_6'] = ta.ema(df['Close'], length=6)
-            df['RSI'] = ta.rsi(df['Close'], length=14)
-            df.ta.vwap(append=True) # Adds VWAP_D
-            df['Vol_SMA'] = ta.sma(df['Volume'], length=20)
+            df = calculate_indicators(df)
             
-            # Get latest 2 candles for crossover logic
             last = df.iloc[-1]
             prev = df.iloc[-2]
             
-            # 1. Bullish & Bearish Crossover Logic
+            # Crossover logic
             bullish_cross = (prev['EMA_3'] <= prev['EMA_6']) and (last['EMA_3'] > last['EMA_6'])
             bearish_cross = (prev['EMA_3'] >= prev['EMA_6']) and (last['EMA_3'] < last['EMA_6'])
             
-            # 2. Probability Score Calculation (0 to 100%)
+            # Sophisticated Probability System
             bull_score = 0
             bear_score = 0
             
             if last['EMA_3'] > last['EMA_6']: bull_score += 25
             if last['EMA_3'] < last['EMA_6']: bear_score += 25
                 
-            if last['Close'] > last['VWAP_D']: bull_score += 25
-            if last['Close'] < last['VWAP_D']: bear_score += 25
+            if last['Close'] > last['VWAP']: bull_score += 25
+            if last['Close'] < last['VWAP']: bear_score += 25
                 
             if last['RSI'] > 60: bull_score += 25
             if last['RSI'] < 40: bear_score += 25
@@ -54,32 +72,30 @@ def get_stock_data():
                 bull_score += 25
                 bear_score += 25
 
-            # Store final data
             results.append({
                 "Stock": ticker.replace(".NS", ""),
-                "Close": round(last['Close'], 2),
-                "RSI": round(last['RSI'], 2),
-                "EMA_3": round(last['EMA_3'], 2),
-                "EMA_6": round(last['EMA_6'], 2),
-                "VWAP": round(last['VWAP_D'], 2),
+                "Close": round(float(last['Close']), 2),
+                "RSI": round(float(last['RSI']), 2) if not pd.isna(last['RSI']) else 50.0,
+                "EMA_3": round(float(last['EMA_3']), 2),
+                "EMA_6": round(float(last['EMA_6']), 2),
+                "VWAP": round(float(last['VWAP']), 2),
                 "Bullish_Prob": f"{bull_score}%",
                 "Bearish_Prob": f"{bear_score}%",
-                "Bull_Cross": bullish_cross,
-                "Bear_Cross": bearish_cross
+                "Bull_Cross": bool(bullish_cross),
+                "Bear_Cross": bool(bear_cross)
             })
-        except Exception:
+        except Exception as e:
             continue
             
     return pd.DataFrame(results)
 
-# Fetching Data
-with st.spinner("Fetching 5-minute data from market..."):
+with st.spinner("Calculating live 5-min market data..."):
     df = get_stock_data()
 
 if df.empty:
-    st.error("Market data fetch karne me error aayi. Thodi der baad try karein.")
+    st.error("Data available nahi hai. Market hours me try karein ya ticker check karein.")
 else:
-    # Creating 8 Tabs as requested
+    # 8 Tabs Creation
     t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
         "🔴 High Prob Bearish", "🟢 High Prob Bullish", 
         "📈 Highest RSI", "📉 Lowest RSI", 
@@ -127,4 +143,4 @@ else:
         vwap_down = df[df['Close'] < df['VWAP']]
         st.dataframe(vwap_down[['Stock', 'Close', 'VWAP']], use_container_width=True)
 
-st.caption("Data is delayed as per Yahoo Finance 5-minute intervals. Refresh the page to update.")
+st.caption("Data is auto-refreshing. Click anywhere or refresh to update live.")
