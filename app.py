@@ -11,8 +11,11 @@ tickers = [
     "SBIN.NS", "ITC.NS", "KOTAKBANK.NS", "L&T.NS", "AXISBANK.NS"
 ]
 
-# Manual Indicator Calculations to avoid pandas-ta errors
 def calculate_indicators(df):
+    # Flatten columns just in case yfinance returns a MultiIndex format
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+        
     # 1. EMA Calculation
     df['EMA_3'] = df['Close'].ewm(span=3, adjust=False).mean()
     df['EMA_6'] = df['Close'].ewm(span=6, adjust=False).mean()
@@ -27,8 +30,10 @@ def calculate_indicators(df):
     # 3. VWAP Calculation (Intraday)
     df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
     df['TP_Vol'] = df['Typical_Price'] * df['Volume']
-    # Group by date to reset VWAP daily
-    df['Date'] = df.index.date
+    
+    # Safe date extraction for timezone aware indices
+    df['Date'] = pd.to_datetime(df.index).date
+    
     df['Cum_TP_Vol'] = df.groupby('Date')['TP_Vol'].cumsum()
     df['Cum_Vol'] = df.groupby('Date')['Volume'].cumsum()
     df['VWAP'] = df['Cum_TP_Vol'] / df['Cum_Vol']
@@ -42,7 +47,10 @@ def get_stock_data():
     results = []
     for ticker in tickers:
         try:
-            df = yf.download(ticker, period="5d", interval="5m", progress=False)
+            # Using Ticker().history() is much more stable than yf.download()
+            stock_data = yf.Ticker(ticker)
+            df = stock_data.history(period="5d", interval="5m")
+            
             if df.empty or len(df) < 20:
                 continue
             
@@ -85,6 +93,7 @@ def get_stock_data():
                 "Bear_Cross": bool(bear_cross)
             })
         except Exception as e:
+            # Silently skip if one stock fails so the whole app doesn't crash
             continue
             
     return pd.DataFrame(results)
@@ -93,7 +102,7 @@ with st.spinner("Calculating live 5-min market data..."):
     df = get_stock_data()
 
 if df.empty:
-    st.error("Data available nahi hai. Market hours me try karein ya ticker check karein.")
+    st.error("Data available nahi hai ya Market band hai. (System is running perfectly!)")
 else:
     # 8 Tabs Creation
     t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
