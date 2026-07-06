@@ -1,5 +1,2 @@
 streamlit
 yfinance
-pandas
-numpy<2.0.0
-pandas-ta
