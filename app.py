@@ -1,75 +1,95 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import requests
+import io
 
-st.set_page_config(page_title="Intraday 5-Min Screener", layout="wide")
-st.title("📈 5-Minute Intraday Stock Screener")
+# ⚙️ Page Setup
+st.set_page_config(page_title="Advanced Nifty Screener", layout="wide")
+st.title("📈 Advanced Intraday Stock Screener (5-Min)")
 
-# List of stocks
-tickers = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
-    "SBIN.NS", "ITC.NS", "KOTAKBANK.NS", "L&T.NS", "AXISBANK.NS"
-]
+# 🎛️ Sidebar for Index Selection
+st.sidebar.header("Screener Settings")
+index_choice = st.sidebar.selectbox(
+    "Kaunsa Index Scan Karna Hai?",
+    ["Nifty 50", "Nifty 100", "Nifty 200", "Nifty 500"]
+)
+st.sidebar.caption("⏳ Note: Nifty 500 scan karne me 30 se 60 seconds lag sakte hain. Please wait.")
 
-def get_stock_data():
-    results = []
-    errors = [] # 🛠 Error pakadne ke liye naya system
+# 📥 Fetch Official Symbols from NSE
+@st.cache_data(ttl=86400) # Cache list for 24 hours
+def get_tickers(index_name):
+    urls = {
+        "Nifty 50": "ind_nifty50list.csv",
+        "Nifty 100": "ind_nifty100list.csv",
+        "Nifty 200": "ind_nifty200list.csv",
+        "Nifty 500": "ind_nifty500list.csv"
+    }
+    url = f"https://archives.nseindia.com/content/indices/{urls[index_name]}"
     
-    for ticker in tickers:
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        df = pd.read_csv(io.StringIO(response.text))
+        # Add .NS to match Yahoo Finance symbols
+        return [f"{sym}.NS" for sym in df['Symbol'].tolist()]
+    except Exception as e:
+        st.error("NSE server se list nahi aayi. Using fallback Top 10.")
+        return ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
+                "SBIN.NS", "ITC.NS", "KOTAKBANK.NS", "LT.NS", "AXISBANK.NS"]
+
+# 🚀 BULK Download & Calculate
+@st.cache_data(ttl=300) # Auto-refresh every 5 minutes
+def get_bulk_data(tickers_list):
+    results = []
+    
+    # Ek sath 50-500 stocks download karne ka superfast method
+    try:
+        data = yf.download(tickers_list, period="5d", interval="5m", group_by="ticker", progress=False, threads=True)
+    except Exception:
+        return pd.DataFrame()
+        
+    for ticker in tickers_list:
         try:
-            stock_data = yf.Ticker(ticker)
-            df = stock_data.history(period="5d", interval="5m")
+            # Handle data structure
+            if len(tickers_list) > 1:
+                if ticker not in data: continue
+                df = data[ticker].copy()
+            else:
+                df = data.copy()
             
-            # Check 1: Kya Yahoo ne empty data bheja?
-            if df.empty:
-                errors.append(f"{ticker}: Yahoo Finance returned empty data.")
-                continue
-                
-            # Check 2: Kya data chota hai?
-            if len(df) < 20:
-                errors.append(f"{ticker}: Not enough candles (only {len(df)}). Need 20.")
-                continue
-                
-            # Make sure columns are properly named
+            df.dropna(inplace=True)
+            if df.empty or len(df) < 20: continue
+            
             df.columns = [c.capitalize() for c in df.columns]
+            if 'Close' not in df.columns: continue
             
-            if 'Close' not in df.columns:
-                errors.append(f"{ticker}: 'Close' price missing in data.")
-                continue
-            
-            # 1. EMA Calculation
+            # Indicator Calculations
             df['EMA_3'] = df['Close'].ewm(span=3, adjust=False).mean()
             df['EMA_6'] = df['Close'].ewm(span=6, adjust=False).mean()
             
-            # 2. RSI Calculation
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / (loss + 1e-10) 
+            rs = gain / (loss + 1e-10)
             df['RSI'] = 100 - (100 / (1 + rs))
             
-            # 3. VWAP Calculation (BUG FIXED)
             df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
             df['TP_Vol'] = df['Typical_Price'] * df['Volume']
-            
-            # Safe Date extraction string format me
             df['Date_Str'] = pd.to_datetime(df.index).strftime('%Y-%m-%d')
-            
             df['Cum_TP_Vol'] = df.groupby('Date_Str')['TP_Vol'].cumsum()
             df['Cum_Vol'] = df.groupby('Date_Str')['Volume'].cumsum()
             df['VWAP'] = df['Cum_TP_Vol'] / df['Cum_Vol']
             
-            # 4. Volume SMA
             df['Vol_SMA'] = df['Volume'].rolling(window=20).mean()
             
-            # Logic calculation
             last = df.iloc[-1]
             prev = df.iloc[-2]
             
-            bullish_cross = (prev['EMA_3'] <= prev['EMA_6']) and (last['EMA_3'] > last['EMA_6'])
-            bearish_cross = (prev['EMA_3'] >= prev['EMA_6']) and (last['EMA_3'] < last['EMA_6'])
+            bull_cross = (prev['EMA_3'] <= prev['EMA_6']) and (last['EMA_3'] > last['EMA_6'])
+            bear_cross = (prev['EMA_3'] >= prev['EMA_6']) and (last['EMA_3'] < last['EMA_6'])
             
-            # Probabilities
+            # Score System
             bull_score = 0
             bear_score = 0
             
@@ -92,31 +112,26 @@ def get_stock_data():
                 "VWAP": round(float(last['VWAP']), 2),
                 "Bullish_Prob": f"{bull_score}%",
                 "Bearish_Prob": f"{bear_score}%",
-                "Bull_Cross": bool(bullish_cross),
+                "Bull_Cross": bool(bull_cross),
                 "Bear_Cross": bool(bear_cross)
             })
-        except Exception as e:
-            errors.append(f"{ticker} Code Error: {str(e)}")
+        except Exception:
             continue
             
-    return pd.DataFrame(results), errors
+    return pd.DataFrame(results)
 
-with st.spinner("Fetching live 5-min market data..."):
-    df, errors = get_stock_data()
+# 🏁 Main Execution Loop
+tickers = get_tickers(index_choice)
 
-# 🛠 ERROR DISPLAY SYSTEM 
+with st.spinner(f"🚀 Scanning {len(tickers)} stocks for {index_choice}. Please wait..."):
+    df = get_bulk_data(tickers)
+
 if df.empty:
-    st.error("❌ Data calculate nahi ho paya!")
-    st.warning("🔍 **ACTUAL ERROR (Iska screenshot bhejna agar theek na ho):**")
-    for err in errors:
-        st.write(f"- {err}")
+    st.error("❌ Data download fail ho gaya. Thodi der me auto-refresh hoga.")
 else:
-    if errors:
-        with st.expander("⚠️ Kuch stocks me issue hai (Click to view)"):
-            for err in errors:
-                st.write(f"- {err}")
-                
-    # Creating Tabs
+    st.success(f"✅ Successfully scanned {len(df)} active stocks from {index_choice}!")
+    
+    # 📑 Dashboard Tabs
     t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs([
         "🔴 High Prob Bearish", "🟢 High Prob Bullish", 
         "📈 Highest RSI", "📉 Lowest RSI", 
